@@ -20,6 +20,13 @@ A demonstration image or GIF will be added here.
 - Formula-style vehicle visualisation
 - Live speed, steering and mode display
 - Modular Python project structure
+- 10 Hz telemetry logging to CSV
+- Actual vs target speed analysis
+- Steering response visualisation
+- Vehicle trajectory plotting
+- Segment-based cross-track error calculation
+- Cross-track error RMSE analysis
+- Automatic telemetry plot export
 
 ## Controls
 
@@ -61,7 +68,36 @@ The PID controller compares the vehicle speed with the current target speed and 
 Curvature-Based Speed Planner
 
 The speed planner estimates the local curvature of the racing line. Higher speeds are requested on straights, while lower target speeds are assigned to tighter corners."
+## Telemetry Analysis
 
+The simulator records vehicle telemetry at 10 Hz and exports the data to `telemetry.csv`.
+
+Recorded signals include:
+
+- Time
+- Vehicle speed
+- Target speed
+- Steering angle
+- X and Y position
+- Yaw
+- Nearest racing-line index
+
+The telemetry analysis script generates:
+
+- Actual vs target speed
+- Steering response
+- Vehicle trajectory
+- Cross-track error
+
+Cross-track error is calculated using the shortest distance between the vehicle position and the nearest racing-line segment.
+
+The analysis also reports:
+
+- Mean cross-track error
+- Maximum cross-track error
+- Cross-track error RMSE
+
+Generated plots are automatically saved in the `telemetry_plots/` directory.
 ## Installation
 
 "Clone the repository:
@@ -85,6 +121,8 @@ Technologies
 "This project currently uses a predefined track and racing line. It does not yet include perception, cone detection, SLAM or sensor fusion.
 
 Therefore, the current version is primarily a path-tracking and vehicle-control simulator rather than a complete autonomous-driving stack."
+
+Vehicle position and tracking-error values currently use simulation coordinates rather than a calibrated physical distance scale.
 
 ## Planned Development
 
