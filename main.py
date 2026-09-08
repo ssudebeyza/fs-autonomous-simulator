@@ -2,7 +2,7 @@ import math
 import sys
 
 import pygame
-
+from telemetry import TelemetryLogger
 from controller import (
     PurePursuitController,
     PIDSpeedController,
@@ -110,14 +110,19 @@ speed_controller = PIDSpeedController(
 )
 
 speed_planner = CurvatureSpeedPlanner()
+telemetry = TelemetryLogger(
+    filename="telemetry.csv",
+)
 
+telemetry.start()
 
 # --------------------------------------------------
 # SIMULATION
 # --------------------------------------------------
 
 autonomous_mode = False
-
+target_speed = 0.0
+nearest_index = 0
 running = True
 while running:
 
@@ -240,6 +245,11 @@ while running:
     car.update_position(
         delta_time,
     )
+    telemetry.log(
+    car=car,
+    target_speed=target_speed,
+    nearest_index=nearest_index,
+)
     # ---------------------------------------------
     # DRAW
     # ---------------------------------------------
@@ -264,6 +274,6 @@ while running:
 # --------------------------------------------------
 # EXIT
 # --------------------------------------------------
-
+telemetry.close()
 pygame.quit()
 sys.exit()

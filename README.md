@@ -35,8 +35,7 @@ A demonstration image or GIF will be added here.
 
 ## Project Structure
 
-```text
-fs-autonomous-simulator/
+"fs-autonomous-simulator/
 ├── controller.py
 ├── graphics.py
 ├── main.py
@@ -46,10 +45,10 @@ fs-autonomous-simulator/
 ├── vehicle.py
 ├── requirements.txt
 ├── .gitignore
-└── README.md
-Control Architecture
+└── README.md"
+## Control Architecture
 
-The simulator separates the vehicle-control problem into three main components:
+"The simulator separates the vehicle-control problem into three main components:
 
 Pure Pursuit Controller
 
@@ -61,11 +60,11 @@ The PID controller compares the vehicle speed with the current target speed and 
 
 Curvature-Based Speed Planner
 
-The speed planner estimates the local curvature of the racing line. Higher speeds are requested on straights, while lower target speeds are assigned to tighter corners.
+The speed planner estimates the local curvature of the racing line. Higher speeds are requested on straights, while lower target speeds are assigned to tighter corners."
 
-Installation
+## Installation
 
-Clone the repository:
+"Clone the repository:
 git clone https://github.com/ssudebeyza/fs-autonomous-simulator.git
 cd fs-autonomous-simulator
 Install the required package:
@@ -79,17 +78,17 @@ Technologies
 * Object-oriented programming
 * Kinematic bicycle model
 * Pure Pursuit control
-* PID control
+* PID control"
 
-Current Limitations
+## Current Limitations
 
-This project currently uses a predefined track and racing line. It does not yet include perception, cone detection, SLAM or sensor fusion.
+"This project currently uses a predefined track and racing line. It does not yet include perception, cone detection, SLAM or sensor fusion.
 
-Therefore, the current version is primarily a path-tracking and vehicle-control simulator rather than a complete autonomous-driving stack.
+Therefore, the current version is primarily a path-tracking and vehicle-control simulator rather than a complete autonomous-driving stack."
 
-Planned Development
+## Planned Development
 
-* Telemetry logging to CSV
+"* Telemetry logging to CSV
 * Speed and steering plots
 * Lap timing
 * Cross-track error calculation
@@ -97,8 +96,8 @@ Planned Development
 * Virtual camera or LiDAR field of view
 * Cone-based path generation
 * Controller comparison
-* More complex Formula Student tracks
+* More complex Formula Student tracks"
 
-Author
+## Author
 
 Developed by Sude Beyza as a personal Formula Student controls and simulation project.
