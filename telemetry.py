@@ -1,5 +1,4 @@
 import csv
-import os
 import time
 
 
@@ -7,24 +6,31 @@ class TelemetryLogger:
     def __init__(
         self,
         filename="telemetry.csv",
+        logging_frequency=10.0,
     ):
         self.filename = filename
-        self.start_time = time.time()
+        self.logging_frequency = logging_frequency
+
+        self.logging_interval = (
+            1.0 / logging_frequency
+        )
+
         self.file = None
         self.writer = None
 
-        # 10 Hz telemetry logging
-        self.log_interval = 0.1
-        self.last_log_time = 0.0
+        self.start_time = None
+        self.last_log_time = None
+
+
+    # ========================================================
+    # START
+    # ========================================================
 
     def start(self):
-        file_exists = os.path.exists(
-            self.filename
-        )
 
         self.file = open(
             self.filename,
-            "a",
+            "w",
             newline="",
         )
 
@@ -32,46 +38,70 @@ class TelemetryLogger:
             self.file
         )
 
-        if not file_exists:
-            self.writer.writerow(
-                [
-                    "time",
-                    "speed",
-                    "target_speed",
-                    "steering_angle",
-                    "x",
-                    "y",
-                    "yaw",
-                    "nearest_index",
-                ]
-            )
+        self.writer.writerow(
+            [
+                "time",
+                "speed",
+                "target_speed",
+                "steering_angle",
+                "x",
+                "y",
+                "yaw",
+                "nearest_index",
+                "reference_cte",
+                "local_path_error",
+                "path_source",
+            ]
+        )
+
+        self.start_time = (
+            time.perf_counter()
+        )
+
+        self.last_log_time = (
+            self.start_time
+        )
+
+
+    # ========================================================
+    # LOG
+    # ========================================================
 
     def log(
         self,
         car,
         target_speed,
         nearest_index,
+        reference_cte=0.0,
+        local_path_error=0.0,
+        path_source="NONE",
     ):
         if self.writer is None:
             return
 
+
         current_time = (
-            time.time()
-            - self.start_time
+            time.perf_counter()
         )
 
-        # Only record one sample every 0.1 seconds = 10 Hz
+
         if (
-            current_time - self.last_log_time
-            < self.log_interval
+            current_time
+            - self.last_log_time
+            < self.logging_interval
         ):
             return
 
-        self.last_log_time = current_time
+
+        elapsed_time = (
+            current_time
+            - self.start_time
+        )
+
 
         self.writer.writerow(
             [
-                current_time,
+                elapsed_time,
                 car.speed,
                 target_speed,
                 car.steering_angle,
@@ -79,9 +109,29 @@ class TelemetryLogger:
                 car.y,
                 car.yaw,
                 nearest_index,
+                reference_cte,
+                local_path_error,
+                path_source,
             ]
         )
 
+
+        self.last_log_time = (
+            current_time
+        )
+
+
+    # ========================================================
+    # CLOSE
+    # ========================================================
+
     def close(self):
+
         if self.file is not None:
+
+            self.file.flush()
             self.file.close()
+
+
+        self.file = None
+        self.writer = None
