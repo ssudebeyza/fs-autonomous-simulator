@@ -1,141 +1,358 @@
-# Formula Student Path Tracking Simulator
+# Formula Student Autonomous Vehicle Simulator
 
-A Python-based Formula Student vehicle control simulator featuring Pure Pursuit steering, PID speed control, racing-line generation and curvature-based speed planning.
+A Python-based Formula Student autonomous vehicle simulation developed to explore path planning, vehicle control, perception, telemetry analysis, and theoretical lap-time simulation.
 
-The project was developed to explore the fundamentals of autonomous vehicle control and path tracking in a lightweight 2D simulation environment.
+The project began as a Pure Pursuit path-following simulator and was progressively expanded to include simulated camera perception, cone-based local path generation, Model Predictive Control (MPC), curvature-based speed planning, telemetry analysis, and a Quasi-Steady-State (QSS) lap simulation.
 
-## Demo
+> This is an educational engineering project. Vehicle, aerodynamic, tyre, and sensor parameters are assumed/simplified unless otherwise stated and should not be interpreted as data from a real Formula Student vehicle.
 
-A demonstration image or GIF will be added here.
+---
+
+## Project Overview
+
+The simulator models a Formula Student-style autonomous vehicle driving around a cone-defined technical circuit.
+
+The autonomous control pipeline is:
+
+```text
+Track Cones
+     ↓
+Simulated Camera
+     ↓
+Visible Cone Detections
+     ↓
+Local Path Generation
+     ↓
+Pure Pursuit / MPC
+     ↓
+Curvature Speed Planner
+     ↓
+Vehicle Model
+     ↓
+Telemetry & Performance Analysis
+```
+
+The project also contains a separate QSS model for estimating theoretical lap performance under assumed vehicle limits.
+
+---
 
 ## Features
 
-- Pure Pursuit path-tracking controller
-- PID longitudinal speed controller
-- Curvature-based target-speed planning
-- Procedural oval track generation
-- Racing-line generation
-- Manual and automatic driving modes
-- Kinematic bicycle vehicle model
-- Formula-style vehicle visualisation
-- Live speed, steering and mode display
-- Modular Python project structure
-- 10 Hz telemetry logging to CSV
-- Actual vs target speed analysis
-- Steering response visualisation
-- Vehicle trajectory plotting
-- Segment-based cross-track error calculation
-- Cross-track error RMSE analysis
-- Automatic telemetry plot export
+### Simulated Camera Perception
 
-## Controls
+A synthetic front-facing camera projects track cones into a perspective camera view.
 
-| Key | Function |
-|---|---|
-| W | Accelerate in manual mode |
-| S | Brake or reverse in manual mode |
-| A | Steer left |
-| D | Steer right |
-| M | Switch between manual and automatic mode |
-| R | Reset the vehicle |
-| ESC | Close the simulator |
+The camera model includes:
 
-## Project Structure
+- Horizontal field of view
+- Maximum detection range
+- Perspective projection
+- Relative cone position
+- Blue/yellow cone classification
+- Camera preview inside the simulator
 
-"fs-autonomous-simulator/
-├── controller.py
-├── graphics.py
-├── main.py
-├── speedplanner.py
-├── track.py
-├── utils.py
-├── vehicle.py
-├── requirements.txt
-├── .gitignore
-└── README.md"
-## Control Architecture
+The current camera system uses known simulator cone coordinates to generate synthetic detections. It is therefore a simulated perception model rather than a real computer-vision pipeline.
 
-"The simulator separates the vehicle-control problem into three main components:
+---
 
-Pure Pursuit Controller
+### Cone-Based Local Path Generation
 
-The Pure Pursuit controller identifies a target point ahead of the vehicle on the racing line and calculates the steering command required to approach it.
+Visible blue and yellow cones are used to construct a local driveable path.
 
-PID Speed Controller
+The path generator includes:
 
-The PID controller compares the vehicle speed with the current target speed and produces an acceleration or braking command.
+- Cone filtering in vehicle coordinates
+- Boundary handling
+- Cone pairing
+- Track-centre estimation
+- Hairpin handling
+- Path continuity checks
+- Path smoothing
+- Short-term path memory
+- Recovery behaviour when perception becomes insufficient
 
-Curvature-Based Speed Planner
+The controller follows the generated local path rather than directly following the global racing line.
 
-The speed planner estimates the local curvature of the racing line. Higher speeds are requested on straights, while lower target speeds are assigned to tighter corners."
-## Telemetry Analysis
+---
 
-The simulator records vehicle telemetry at 10 Hz and exports the data to `telemetry.csv`.
+## Pure Pursuit Controller
 
-Recorded signals include:
+Pure Pursuit is retained as the baseline path-following controller.
+
+Features include:
+
+- Dynamic lookahead distance
+- Nearest-path-point search
+- Steering-angle calculation
+- Steering limits
+- Local-path tracking
+
+Pure Pursuit provides a useful reference controller for comparison with MPC.
+
+---
+
+## Model Predictive Control
+
+The simulator also includes a finite-horizon predictive steering controller.
+
+The MPC evaluates candidate steering sequences using a simplified vehicle model and selects the command with the lowest predicted cost.
+
+The cost function considers:
+
+- Path tracking error
+- Heading error
+- Steering magnitude
+- Steering change
+- Forward progress
+- Cone clearance
+- Terminal path error
+- Terminal heading alignment
+
+A two-stage steering sequence allows the controller to predict both corner entry/apex steering and steering unwind at corner exit. This was particularly important for negotiating the circuit's tight hairpin.
+
+> The controller is a lightweight candidate-search MPC implementation rather than a full optimisation-based constrained MPC solver.
+
+---
+
+## Speed Planning
+
+Target speed is generated from local path geometry.
+
+The curvature-based speed planner considers:
+
+- Local path curvature
+- Lateral acceleration limit
+- Maximum vehicle speed
+- Acceleration limit
+- Braking limit
+- Preview distance
+
+The vehicle therefore reduces speed for high-curvature sections and accelerates as the path opens.
+
+---
+
+## Vehicle Model
+
+Vehicle motion is simulated using a kinematic bicycle model.
+
+The model includes:
+
+- Vehicle position
+- Yaw angle
+- Steering angle
+- Wheelbase
+- Longitudinal acceleration
+- Braking
+- Maximum speed
+
+Simulation units are converted between screen coordinates and SI units using a defined pixels-per-metre scale.
+
+---
+
+## Telemetry
+
+Telemetry is recorded during simulation at approximately 10 Hz.
+
+Logged parameters include:
 
 - Time
 - Vehicle speed
 - Target speed
 - Steering angle
-- X and Y position
+- X/Y position
 - Yaw
-- Nearest racing-line index
+- Nearest path index
+- Reference cross-track error
+- Local path error
+- Active path source
 
-The telemetry analysis script generates:
+Telemetry can be analysed after a run to evaluate controller behaviour and vehicle performance.
 
-- Actual vs target speed
-- Steering response
-- Vehicle trajectory
-- Cross-track error
+---
 
-Cross-track error is calculated using the shortest distance between the vehicle position and the nearest racing-line segment.
+## Lap Performance
 
-The analysis also reports:
+The simulator tracks completed laps and calculates performance metrics including:
 
+- Lap time
+- Average speed
+- Maximum speed
 - Mean cross-track error
-- Maximum cross-track error
-- Cross-track error RMSE
+- Cross-track-error RMSE
 
-Generated plots are automatically saved in the `telemetry_plots/` directory.
+These metrics can be used to compare Pure Pursuit and MPC under the same simulated track conditions.
+
+---
+
+# Quasi-Steady-State Lap Simulation
+
+A separate QSS module estimates theoretical lap performance using assumed vehicle limits.
+
+The QSS calculation uses:
+
+- Track geometry
+- Track curvature
+- Maximum lateral acceleration
+- Longitudinal acceleration capability
+- Braking capability
+- Power limitation
+- Aerodynamic drag
+- Rolling resistance
+
+The solver performs forward acceleration and backward braking passes to construct a theoretical speed profile around the circuit.
+
+With the current assumed vehicle parameters, one simulation produced approximately:
+
+```text
+Track Length:          427.23 m
+Theoretical Lap Time:   30.79 s
+Average Speed:          13.88 m/s
+Maximum Speed:          28.42 m/s
+Minimum Speed:           5.68 m/s
+```
+
+These values are theoretical outputs from the assumed model and are not claimed to represent a real Formula Student vehicle.
+
+The QSS module can also generate:
+
+- Speed profile vs distance
+- Track curvature vs distance
+- Speed map around the circuit
+
+---
+
+## Project Structure
+
+```text
+fs-autonomous-simulator/
+│
+├── main.py
+├── vehicle.py
+├── track.py
+├── controller.py
+├── mpccontroller.py
+├── camera.py
+├── pathgen.py
+├── perception.py
+├── speedplanner.py
+├── telemetry.py
+├── plottelemetry.py
+├── laptimer.py
+├── performance.py
+├── graphics.py
+├── utils.py
+│
+├── qss/
+│   ├── plots.py
+│   ├── run.py
+│   ├── solver.py
+│   ├── trackmodel.py
+│   └── vehiclemodel.py
+│
+├── requirements.txt
+└── README.md
+```
+
+---
+
+## Controls
+
+During the interactive simulation:
+
+```text
+M     Toggle manual / autonomous mode
+C     Toggle Pure Pursuit / MPC
+R     Reset vehicle
+ESC   Exit
+```
+
+---
+
 ## Installation
 
-"Clone the repository:
+Clone the repository:
+
+```bash
 git clone https://github.com/ssudebeyza/fs-autonomous-simulator.git
 cd fs-autonomous-simulator
-Install the required package:
+```
+
+Install dependencies:
+
+```bash
 pip install -r requirements.txt
-Run the simulator:
+```
+
+Run the interactive simulator:
+
+```bash
 python main.py
-Technologies
+```
 
-* Python
-* Pygame
-* Object-oriented programming
-* Kinematic bicycle model
-* Pure Pursuit control
-* PID control"
+Run the QSS lap simulation:
 
-## Current Limitations
+```bash
+python -m qss.run
+```
 
-"This project currently uses a predefined track and racing line. It does not yet include perception, cone detection, SLAM or sensor fusion.
+---
 
-Therefore, the current version is primarily a path-tracking and vehicle-control simulator rather than a complete autonomous-driving stack."
+## Technologies
 
-Vehicle position and tracking-error values currently use simulation coordinates rather than a calibrated physical distance scale.
+- Python
+- Pygame
+- NumPy
+- Matplotlib
+- Git / GitHub
 
-## Planned Development
+---
 
-"* Telemetry logging to CSV
-* Speed and steering plots
-* Lap timing
-* Cross-track error calculation
-* Track-boundary detection
-* Virtual camera or LiDAR field of view
-* Cone-based path generation
-* Controller comparison
-* More complex Formula Student tracks"
+## Engineering Scope
+
+This project was developed as a learning platform for Formula Student autonomous systems and vehicle-performance engineering.
+
+The main areas explored were:
+
+- Path-following control
+- Pure Pursuit
+- Model Predictive Control
+- Local path planning
+- Synthetic sensor modelling
+- Vehicle dynamics
+- Curvature-based speed planning
+- Controller tuning
+- Telemetry analysis
+- QSS lap simulation
+- Engineering debugging and iterative validation
+
+The project intentionally uses simplified models so that individual control and vehicle-performance concepts can be studied independently.
+
+---
+
+## Limitations and Future Development
+
+Current limitations include:
+
+- Synthetic rather than image-based cone detection
+- Simplified kinematic vehicle dynamics
+- Simplified tyre behaviour
+- No combined tyre friction ellipse
+- No aerodynamic downforce model in the interactive vehicle
+- Idealised sensor measurements
+- QSS results based on assumed vehicle parameters
+
+Possible future extensions include:
+
+- Real image-based cone detection
+- Sensor noise and uncertainty
+- Dynamic bicycle model
+- Tyre friction ellipse
+- Aerodynamic load model
+- More advanced MPC optimisation
+- Controller benchmarking across multiple tracks
+
+---
 
 ## Author
 
-Developed by Sude Beyza as a personal Formula Student controls and simulation project.
+Developed by **Sude Beyza** as an independent Formula Student autonomous vehicle simulation and vehicle-performance learning project.
