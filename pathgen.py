@@ -4,39 +4,54 @@ from vehicle import PIXELS_PER_METER
 
 
 class LocalPathGenerator:
+    """
+    Camera-based local path generator.
+
+    Main idea:
+    1. Filter camera-visible cones.
+    2. Order blue and yellow boundaries independently.
+    3. Build centre path from valid blue-yellow pairs.
+    4. If pairing becomes weak in a hairpin, estimate the
+       centre from ONE visible boundary.
+    5. Use previous path for short-term temporal continuity.
+
+    This prevents the control path from disappearing in
+    tight hairpins or partial camera visibility.
+    """
+
     def __init__(
         self,
         min_track_width_m=3.0,
-        max_track_width_m=14.0,
-        max_forward_distance_m=50.0,
-        min_forward_distance_m=-6.0,
-        max_lateral_distance_m=24.0,
+        max_track_width_m=11.0,
+        expected_track_width_m=6.0,
+        max_forward_distance_m=35.0,
+        min_forward_distance_m=-4.0,
+        max_lateral_distance_m=20.0,
         max_forward_pair_difference_m=10.0,
-        max_midpoint_gap_m=18.0,
+        max_midpoint_gap_m=14.0,
     ):
         self.min_track_width_px = (
-            min_track_width_m
-            * PIXELS_PER_METER
+            min_track_width_m * PIXELS_PER_METER
         )
 
         self.max_track_width_px = (
-            max_track_width_m
-            * PIXELS_PER_METER
+            max_track_width_m * PIXELS_PER_METER
+        )
+
+        self.expected_track_width_px = (
+            expected_track_width_m * PIXELS_PER_METER
         )
 
         self.max_forward_distance_px = (
-            max_forward_distance_m
-            * PIXELS_PER_METER
+            max_forward_distance_m * PIXELS_PER_METER
         )
 
         self.min_forward_distance_px = (
-            min_forward_distance_m
-            * PIXELS_PER_METER
+            min_forward_distance_m * PIXELS_PER_METER
         )
 
         self.max_lateral_distance_px = (
-            max_lateral_distance_m
-            * PIXELS_PER_METER
+            max_lateral_distance_m * PIXELS_PER_METER
         )
 
         self.max_forward_pair_difference_px = (
@@ -49,48 +64,70 @@ class LocalPathGenerator:
             * PIXELS_PER_METER
         )
 
+        # Boundary tracing
+        self.max_boundary_step_px = (
+            11.0 * PIXELS_PER_METER
+        )
 
-    # ==================================================
-    # ANGLE
-    # ==================================================
+        self.max_boundary_turn = math.radians(125.0)
 
-    def _normalize_angle(
-        self,
-        angle,
-    ):
+        # Final centre-path validation
+        self.max_path_turn = math.radians(125.0)
+
+        # Previous valid camera path
+        self.previous_path = []
+
+        # Remember recently measured track width.
+        self.track_width_estimate_px = (
+            self.expected_track_width_px
+        )
+
+    # ======================================================
+    # RESET
+    # ======================================================
+
+    def reset(self):
+        self.previous_path = []
+
+        self.track_width_estimate_px = (
+            self.expected_track_width_px
+        )
+
+    # ======================================================
+    # HELPERS
+    # ======================================================
+
+    @staticmethod
+    def _normalize_angle(angle):
         return (
             angle + math.pi
         ) % (
             2.0 * math.pi
         ) - math.pi
 
+    @staticmethod
+    def _distance(a, b):
+        return math.hypot(
+            b[0] - a[0],
+            b[1] - a[1],
+        )
 
-    # ==================================================
-    # WORLD -> CAR COORDINATES
-    # ==================================================
+    # ======================================================
+    # WORLD -> VEHICLE COORDINATES
+    # ======================================================
 
     def _to_car_coordinates(
         self,
         car,
         point,
     ):
-        dx = (
-            point[0]
-            - car.x
-        )
+        dx = point[0] - car.x
 
-        dy = (
-            car.y
-            - point[1]
-        )
+        # pygame Y axis is downward.
+        dy = car.y - point[1]
 
-        cos_yaw = math.cos(
-            car.yaw
-        )
-
-        sin_yaw = math.sin(
-            car.yaw
-        )
+        cos_yaw = math.cos(car.yaw)
+        sin_yaw = math.sin(car.yaw)
 
         forward = (
             dx * cos_yaw
@@ -102,22 +139,18 @@ class LocalPathGenerator:
             + dy * cos_yaw
         )
 
-        return (
-            forward,
-            lateral,
-        )
+        return forward, lateral
 
-
-    # ==================================================
-    # FILTER CONES
-    # ==================================================
+    # ======================================================
+    # CAMERA CONE FILTER
+    # ======================================================
 
     def _filter_cones(
         self,
         car,
         cones,
     ):
-        valid = []
+        filtered = []
 
         for cone in cones:
 
@@ -146,527 +179,907 @@ class LocalPathGenerator:
             ):
                 continue
 
-            valid.append(
+            filtered.append(
                 {
-                    "point": cone,
+                    "point": (
+                        float(cone[0]),
+                        float(cone[1]),
+                    ),
                     "forward": forward,
                     "lateral": lateral,
                 }
             )
 
-        valid.sort(
-            key=lambda item: item["forward"]
+        return filtered
+
+    # ======================================================
+    # BOUNDARY START
+    # ======================================================
+
+    def _choose_boundary_start(
+        self,
+        cones,
+    ):
+        if not cones:
+            return None
+
+        candidates = [
+            cone
+            for cone in cones
+            if (
+                cone["forward"]
+                >= -1.0 * PIXELS_PER_METER
+            )
+        ]
+
+        if not candidates:
+            candidates = cones
+
+        return min(
+            candidates,
+            key=lambda cone: (
+                math.hypot(
+                    cone["forward"],
+                    cone["lateral"],
+                )
+            ),
         )
 
-        return valid
+    # ======================================================
+    # ORDER ONE COLOUR BOUNDARY
+    # ======================================================
 
-
-    # ==================================================
-    # CREATE BLUE/YELLOW PAIRS
-    # ==================================================
-
-    def _create_pairs(
+    def _order_boundary(
         self,
-        blue,
-        yellow,
+        car,
+        cones,
     ):
-        candidates = []
+        if not cones:
+            return []
 
+        start = self._choose_boundary_start(
+            cones
+        )
 
-        for (
-            blue_index,
-            blue_cone,
-        ) in enumerate(blue):
+        if start is None:
+            return []
 
-            for (
-                yellow_index,
-                yellow_cone,
-            ) in enumerate(yellow):
+        ordered = [start]
 
+        remaining = [
+            cone
+            for cone in cones
+            if cone is not start
+        ]
 
-                # --------------------------------------
-                # FORWARD DIFFERENCE
-                # --------------------------------------
+        # First segment roughly follows vehicle heading.
+        previous_heading = car.yaw
 
-                forward_difference = abs(
-                    blue_cone["forward"]
-                    - yellow_cone["forward"]
-                )
+        while remaining:
 
-                if (
-                    forward_difference
-                    > self.max_forward_pair_difference_px
-                ):
-                    continue
+            current = ordered[-1]["point"]
 
+            best = None
+            best_heading = None
+            best_score = float("inf")
 
-                # --------------------------------------
-                # TRACK WIDTH
-                # --------------------------------------
+            for candidate in remaining:
+
+                point = candidate["point"]
 
                 dx = (
-                    yellow_cone["point"][0]
-                    - blue_cone["point"][0]
+                    point[0]
+                    - current[0]
                 )
 
                 dy = (
-                    yellow_cone["point"][1]
-                    - blue_cone["point"][1]
+                    current[1]
+                    - point[1]
                 )
 
-                track_width = math.hypot(
+                distance = math.hypot(
                     dx,
                     dy,
                 )
 
-                if (
-                    track_width
-                    < self.min_track_width_px
-                ):
+                if distance < 1.0:
                     continue
-
-                if (
-                    track_width
-                    > self.max_track_width_px
-                ):
-                    continue
-
-
-                # --------------------------------------
-                # LATERAL BALANCE
-                # --------------------------------------
-
-                lateral_balance = abs(
-                    abs(
-                        blue_cone["lateral"]
-                    )
-                    -
-                    abs(
-                        yellow_cone["lateral"]
-                    )
-                )
-
-
-                # --------------------------------------
-                # SAME SIDE PENALTY
-                # --------------------------------------
-
-                same_side_penalty = 0.0
-
-                if (
-                    blue_cone["lateral"]
-                    * yellow_cone["lateral"]
-                    > 0.0
-                ):
-                    same_side_penalty = (
-                        4.0
-                        * PIXELS_PER_METER
-                    )
-
-
-                # --------------------------------------
-                # PAIR SCORE
-                # --------------------------------------
-
-                score = (
-                    forward_difference
-                    * 3.0
-
-                    + lateral_balance
-                    * 1.5
-
-                    + track_width
-                    * 0.2
-
-                    + same_side_penalty
-                )
-
-
-                candidates.append(
-                    (
-                        score,
-                        blue_index,
-                        yellow_index,
-                    )
-                )
-
-
-        # Best candidate first
-        candidates.sort(
-            key=lambda item: item[0]
-        )
-
-
-        # ==================================================
-        # ONE TO ONE PAIRING
-        # ==================================================
-
-        used_blue = set()
-        used_yellow = set()
-
-        pairs = []
-
-
-        for (
-            score,
-            blue_index,
-            yellow_index,
-        ) in candidates:
-
-            if (
-                blue_index
-                in used_blue
-            ):
-                continue
-
-            if (
-                yellow_index
-                in used_yellow
-            ):
-                continue
-
-
-            blue_cone = (
-                blue[blue_index]
-            )
-
-            yellow_cone = (
-                yellow[yellow_index]
-            )
-
-
-            midpoint = (
-                (
-                    blue_cone["point"][0]
-                    + yellow_cone["point"][0]
-                )
-                / 2.0,
-
-                (
-                    blue_cone["point"][1]
-                    + yellow_cone["point"][1]
-                )
-                / 2.0,
-            )
-
-
-            midpoint_forward = (
-                blue_cone["forward"]
-                + yellow_cone["forward"]
-            ) / 2.0
-
-
-            pairs.append(
-                (
-                    midpoint_forward,
-                    midpoint,
-                )
-            )
-
-
-            used_blue.add(
-                blue_index
-            )
-
-            used_yellow.add(
-                yellow_index
-            )
-
-
-        return pairs
-
-
-    # ==================================================
-    # BUILD CONTINUOUS PATH
-    # ==================================================
-
-    def _build_continuous_path(
-        self,
-        car,
-        pairs,
-    ):
-        if not pairs:
-            return []
-
-
-        if len(pairs) == 1:
-            return [
-                pairs[0][1]
-            ]
-
-
-        # ==================================================
-        # START POINT
-        #
-        # Do not blindly use the most rearward point.
-        # Prefer a midpoint close to the vehicle.
-        # ==================================================
-
-        usable_pairs = [
-            pair
-            for pair in pairs
-            if (
-                pair[0]
-                >= -1.5
-                * PIXELS_PER_METER
-            )
-        ]
-
-
-        if usable_pairs:
-
-            start_pair = min(
-                usable_pairs,
-                key=lambda pair: abs(
-                    pair[0]
-                ),
-            )
-
-        else:
-
-            start_pair = min(
-                pairs,
-                key=lambda pair: abs(
-                    pair[0]
-                ),
-            )
-
-
-        start_point = (
-            start_pair[1]
-        )
-
-
-        points = [
-            pair[1]
-            for pair in pairs
-        ]
-
-
-        local_path = [
-            start_point
-        ]
-
-
-        remaining = [
-            point
-            for point in points
-            if point != start_point
-        ]
-
-
-        # First direction comes from vehicle heading
-        previous_heading = (
-            car.yaw
-        )
-
-
-        # ==================================================
-        # BUILD CHAIN
-        # ==================================================
-
-        while remaining:
-
-            current_point = (
-                local_path[-1]
-            )
-
-            best_point = None
-            best_score = float("inf")
-            best_heading = None
-
-
-            for point in remaining:
-
-                dx = (
-                    point[0]
-                    - current_point[0]
-                )
-
-                # Screen Y increases downward.
-                dy_world = (
-                    current_point[1]
-                    - point[1]
-                )
-
-
-                distance = math.hypot(
-                    dx,
-                    dy_world,
-                )
-
-
-                # --------------------------------------
-                # TOO CLOSE
-                # --------------------------------------
-
-                if distance < 3.0:
-                    continue
-
-
-                # --------------------------------------
-                # TOO FAR
-                # --------------------------------------
 
                 if (
                     distance
-                    > self.max_midpoint_gap_px
+                    > self.max_boundary_step_px
                 ):
                     continue
 
-
-                # --------------------------------------
-                # CANDIDATE HEADING
-                # --------------------------------------
-
-                candidate_heading = (
-                    math.atan2(
-                        dy_world,
-                        dx,
-                    )
+                heading = math.atan2(
+                    dy,
+                    dx,
                 )
 
-
-                angle_difference = (
+                heading_change = abs(
                     self._normalize_angle(
-                        candidate_heading
+                        heading
                         - previous_heading
                     )
                 )
 
-
-                # --------------------------------------
-                # REJECT SUDDEN REVERSAL
-                #
-                # Hairpin can turn strongly overall,
-                # but consecutive path segments should
-                # still rotate gradually.
-                # --------------------------------------
-
                 if (
-                    abs(angle_difference)
-                    > math.radians(95.0)
+                    heading_change
+                    > self.max_boundary_turn
                 ):
                     continue
-
-
-                # --------------------------------------
-                # FORWARD PROJECTION
-                #
-                # Prevent jumping across to the nearby
-                # opposite branch of the hairpin.
-                # --------------------------------------
 
                 projection = (
                     dx
-                    * math.cos(
-                        previous_heading
-                    )
-
-                    + dy_world
-                    * math.sin(
-                        previous_heading
-                    )
+                    * math.cos(previous_heading)
+                    + dy
+                    * math.sin(previous_heading)
                 )
 
-
-                # Small backward tolerance is allowed.
+                # Hairpins need some backwards
+                # projection to be allowed.
                 if (
                     projection
-                    < -1.5
-                    * PIXELS_PER_METER
+                    < -3.0 * PIXELS_PER_METER
                 ):
                     continue
 
+                score = distance
 
-                # --------------------------------------
-                # HEADING PENALTY
-                # --------------------------------------
-
-                heading_penalty = (
-                    abs(
-                        angle_difference
-                    )
-                    * 80.0
+                # Prefer direction continuity.
+                score += (
+                    heading_change * 70.0
                 )
-
-
-                # --------------------------------------
-                # BACKWARD PENALTY
-                # --------------------------------------
-
-                backward_penalty = 0.0
-
 
                 if projection < 0.0:
-
-                    backward_penalty = (
-                        abs(
-                            projection
-                        )
-                        * 2.5
+                    score += (
+                        abs(projection) * 1.5
                     )
 
-
-                # --------------------------------------
-                # TOTAL SCORE
-                # --------------------------------------
-
-                score = (
-                    distance
-                    + heading_penalty
-                    + backward_penalty
+                # Avoid giant jumps in camera-forward
+                # coordinate when two hairpin branches
+                # are physically close.
+                forward_jump = abs(
+                    candidate["forward"]
+                    - ordered[-1]["forward"]
                 )
 
+                score += (
+                    0.15 * forward_jump
+                )
 
                 if score < best_score:
 
-                    best_score = (
-                        score
-                    )
+                    best = candidate
+                    best_heading = heading
+                    best_score = score
 
-                    best_point = (
-                        point
-                    )
-
-                    best_heading = (
-                        candidate_heading
-                    )
-
-
-            # ------------------------------------------
-            # NO VALID CONTINUATION
-            # ------------------------------------------
-
-            if best_point is None:
+            if best is None:
                 break
 
+            ordered.append(best)
 
-            # ------------------------------------------
-            # ADD TO PATH
-            # ------------------------------------------
-
-            local_path.append(
-                best_point
-            )
-
+            remaining.remove(best)
 
             previous_heading = (
                 best_heading
             )
 
+        return ordered
 
-            remaining.remove(
-                best_point
+    # ======================================================
+    # BLUE/YELLOW PAIR VALIDITY
+    # ======================================================
+
+    def _pair_valid(
+        self,
+        blue,
+        yellow,
+    ):
+        width = self._distance(
+            blue["point"],
+            yellow["point"],
+        )
+
+        if (
+            width
+            < self.min_track_width_px
+        ):
+            return False
+
+        if (
+            width
+            > self.max_track_width_px
+        ):
+            return False
+
+        forward_difference = abs(
+            blue["forward"]
+            - yellow["forward"]
+        )
+
+        if (
+            forward_difference
+            > self.max_forward_pair_difference_px
+        ):
+            return False
+
+        # IMPORTANT:
+        #
+        # We deliberately DO NOT require:
+        #
+        # blue lateral * yellow lateral < 0
+        #
+        # because during a hairpin both boundaries
+        # may temporarily appear on the same side
+        # of the vehicle/camera coordinate frame.
+
+        return True
+
+    # ======================================================
+    # PAIR ORDERED BOUNDARIES
+    # ======================================================
+
+    def _pair_boundaries(
+        self,
+        blue,
+        yellow,
+    ):
+        if not blue or not yellow:
+            return [], []
+
+        midpoints = []
+        widths = []
+
+        blue_index = 0
+        yellow_index = 0
+
+        while (
+            blue_index < len(blue)
+            and
+            yellow_index < len(yellow)
+        ):
+
+            b = blue[blue_index]
+            y = yellow[yellow_index]
+
+            if self._pair_valid(
+                b,
+                y,
+            ):
+                midpoint = (
+                    (
+                        b["point"][0]
+                        + y["point"][0]
+                    ) / 2.0,
+
+                    (
+                        b["point"][1]
+                        + y["point"][1]
+                    ) / 2.0,
+                )
+
+                width = self._distance(
+                    b["point"],
+                    y["point"],
+                )
+
+                midpoints.append(midpoint)
+                widths.append(width)
+
+                blue_index += 1
+                yellow_index += 1
+
+                continue
+
+            # Try skipping one cone instead of
+            # immediately abandoning the path.
+
+            next_blue_valid = False
+            next_yellow_valid = False
+
+            if (
+                blue_index + 1
+                < len(blue)
+            ):
+                next_blue_valid = (
+                    self._pair_valid(
+                        blue[
+                            blue_index + 1
+                        ],
+                        y,
+                    )
+                )
+
+            if (
+                yellow_index + 1
+                < len(yellow)
+            ):
+                next_yellow_valid = (
+                    self._pair_valid(
+                        b,
+                        yellow[
+                            yellow_index + 1
+                        ],
+                    )
+                )
+
+            if (
+                next_blue_valid
+                and not next_yellow_valid
+            ):
+                blue_index += 1
+
+            elif (
+                next_yellow_valid
+                and not next_blue_valid
+            ):
+                yellow_index += 1
+
+            else:
+                # No obvious pair.
+                # Advance whichever is currently
+                # closer to the vehicle.
+                if (
+                    b["forward"]
+                    < y["forward"]
+                ):
+                    blue_index += 1
+                else:
+                    yellow_index += 1
+
+        return midpoints, widths
+
+    # ======================================================
+    # TRACK WIDTH MEMORY
+    # ======================================================
+
+    def _update_track_width(
+        self,
+        widths,
+    ):
+        if not widths:
+            return
+
+        valid_widths = [
+            width
+            for width in widths
+            if (
+                self.min_track_width_px
+                <= width
+                <= self.max_track_width_px
+            )
+        ]
+
+        if not valid_widths:
+            return
+
+        measured = (
+            sum(valid_widths)
+            / len(valid_widths)
+        )
+
+        # Low-pass update so one bad pair cannot
+        # suddenly change our width estimate.
+        self.track_width_estimate_px = (
+            0.85
+            * self.track_width_estimate_px
+            + 0.15
+            * measured
+        )
+
+        self.track_width_estimate_px = max(
+            self.min_track_width_px,
+            min(
+                self.track_width_estimate_px,
+                self.max_track_width_px,
+            ),
+        )
+
+    # ======================================================
+    # SINGLE BOUNDARY -> ESTIMATED CENTRE
+    # ======================================================
+
+    def _centre_from_boundary(
+        self,
+        boundary,
+        colour,
+    ):
+        """
+        Estimate track centre from one ordered boundary.
+
+        For every boundary point we estimate its tangent and
+        shift it approximately half a track width toward the
+        inside of the track.
+
+        Blue and yellow use opposite normal directions.
+        """
+
+        if len(boundary) < 2:
+            return []
+
+        centre_path = []
+
+        half_width = (
+            0.5
+            * self.track_width_estimate_px
+        )
+
+        for index in range(
+            len(boundary)
+        ):
+
+            point = (
+                boundary[index]["point"]
             )
 
+            if index == 0:
 
-        return local_path
+                next_point = (
+                    boundary[index + 1][
+                        "point"
+                    ]
+                )
 
+                dx = (
+                    next_point[0]
+                    - point[0]
+                )
 
-    # ==================================================
-    # SMOOTH PATH
-    # ==================================================
+                dy_cart = (
+                    point[1]
+                    - next_point[1]
+                )
+
+            elif (
+                index
+                == len(boundary) - 1
+            ):
+
+                previous_point = (
+                    boundary[index - 1][
+                        "point"
+                    ]
+                )
+
+                dx = (
+                    point[0]
+                    - previous_point[0]
+                )
+
+                dy_cart = (
+                    previous_point[1]
+                    - point[1]
+                )
+
+            else:
+
+                previous_point = (
+                    boundary[index - 1][
+                        "point"
+                    ]
+                )
+
+                next_point = (
+                    boundary[index + 1][
+                        "point"
+                    ]
+                )
+
+                dx = (
+                    next_point[0]
+                    - previous_point[0]
+                )
+
+                dy_cart = (
+                    previous_point[1]
+                    - next_point[1]
+                )
+
+            length = math.hypot(
+                dx,
+                dy_cart,
+            )
+
+            if length < 1e-6:
+                continue
+
+            tangent_x = (
+                dx / length
+            )
+
+            tangent_y = (
+                dy_cart / length
+            )
+
+            # Cartesian left normal.
+            normal_x = (
+                -tangent_y
+            )
+
+            normal_y = (
+                tangent_x
+            )
+
+            # Convention:
+            # blue boundary -> centre to its right
+            # yellow boundary -> centre to its left
+            #
+            # If your track.py uses the opposite colour
+            # convention, swap these two signs.
+            if colour == "blue":
+
+                shift_x = (
+                    normal_x
+                    * half_width
+                )
+
+                shift_y_cart = (
+                    normal_y
+                    * half_width
+                )
+
+            else:
+
+                shift_x = (
+                    -normal_x
+                    * half_width
+                )
+
+                shift_y_cart = (
+                    -normal_y
+                    * half_width
+                )
+
+            centre_x = (
+                point[0]
+                + shift_x
+            )
+
+            # Cartesian Y -> pygame Y
+            centre_y = (
+                point[1]
+                - shift_y_cart
+            )
+
+            centre_path.append(
+                (
+                    centre_x,
+                    centre_y,
+                )
+            )
+
+        return centre_path
+
+    # ======================================================
+    # SCORE A PATH
+    # ======================================================
+
+    def _path_score(
+        self,
+        car,
+        path,
+    ):
+        if len(path) < 2:
+            return float("inf")
+
+        score = 0.0
+
+        previous_heading = car.yaw
+
+        for index in range(
+            1,
+            len(path)
+        ):
+
+            p0 = path[index - 1]
+            p1 = path[index]
+
+            dx = p1[0] - p0[0]
+            dy = p0[1] - p1[1]
+
+            distance = math.hypot(
+                dx,
+                dy,
+            )
+
+            if distance < 1.0:
+                continue
+
+            heading = math.atan2(
+                dy,
+                dx,
+            )
+
+            turn = abs(
+                self._normalize_angle(
+                    heading
+                    - previous_heading
+                )
+            )
+
+            score += (
+                turn * 30.0
+            )
+
+            if (
+                distance
+                > self.max_midpoint_gap_px
+            ):
+                score += 1000.0
+
+            previous_heading = heading
+
+        # Prefer longer usable paths.
+        score -= (
+            len(path) * 5.0
+        )
+
+        return score
+
+    # ======================================================
+    # CHOOSE FALLBACK BOUNDARY
+    # ======================================================
+
+    def _single_boundary_fallback(
+        self,
+        car,
+        blue_boundary,
+        yellow_boundary,
+    ):
+        candidates = []
+
+        if len(blue_boundary) >= 2:
+
+            blue_path = (
+                self._centre_from_boundary(
+                    blue_boundary,
+                    "blue",
+                )
+            )
+
+            if len(blue_path) >= 2:
+
+                candidates.append(
+                    (
+                        self._path_score(
+                            car,
+                            blue_path,
+                        ),
+                        blue_path,
+                    )
+                )
+
+        if len(yellow_boundary) >= 2:
+
+            yellow_path = (
+                self._centre_from_boundary(
+                    yellow_boundary,
+                    "yellow",
+                )
+            )
+
+            if len(yellow_path) >= 2:
+
+                candidates.append(
+                    (
+                        self._path_score(
+                            car,
+                            yellow_path,
+                        ),
+                        yellow_path,
+                    )
+                )
+
+        if not candidates:
+            return []
+
+        candidates.sort(
+            key=lambda item: item[0]
+        )
+
+        return candidates[0][1]
+
+    # ======================================================
+    # CLEAN CENTRE PATH
+    # ======================================================
+
+    def _clean_path(
+        self,
+        car,
+        path,
+    ):
+        if not path:
+            return []
+
+        clean = []
+
+        previous_heading = car.yaw
+
+        for point in path:
+
+            if not clean:
+
+                forward, _ = (
+                    self._to_car_coordinates(
+                        car,
+                        point,
+                    )
+                )
+
+                if (
+                    forward
+                    < -2.0
+                    * PIXELS_PER_METER
+                ):
+                    continue
+
+                clean.append(point)
+
+                continue
+
+            previous = clean[-1]
+
+            dx = (
+                point[0]
+                - previous[0]
+            )
+
+            dy = (
+                previous[1]
+                - point[1]
+            )
+
+            distance = math.hypot(
+                dx,
+                dy,
+            )
+
+            if distance < 1.0:
+                continue
+
+            if (
+                distance
+                > self.max_midpoint_gap_px
+            ):
+                break
+
+            heading = math.atan2(
+                dy,
+                dx,
+            )
+
+            turn = abs(
+                self._normalize_angle(
+                    heading
+                    - previous_heading
+                )
+            )
+
+            if (
+                turn
+                > self.max_path_turn
+            ):
+                break
+
+            clean.append(point)
+
+            previous_heading = heading
+
+        return clean
+
+    # ======================================================
+    # REMOVE OLD PATH BEHIND VEHICLE
+    # ======================================================
+
+    def _prune_previous_path(
+        self,
+        car,
+    ):
+        useful = []
+
+        for point in self.previous_path:
+
+            forward, lateral = (
+                self._to_car_coordinates(
+                    car,
+                    point,
+                )
+            )
+
+            if (
+                forward
+                < -1.5
+                * PIXELS_PER_METER
+            ):
+                continue
+
+            if (
+                forward
+                > 25.0
+                * PIXELS_PER_METER
+            ):
+                continue
+
+            if (
+                abs(lateral)
+                > 18.0
+                * PIXELS_PER_METER
+            ):
+                continue
+
+            useful.append(point)
+
+        self.previous_path = useful
+
+    # ======================================================
+    # TEMPORAL CONTINUITY
+    # ======================================================
+
+    def _apply_temporal_continuity(
+        self,
+        car,
+        path,
+    ):
+        if not path:
+            return []
+
+        self._prune_previous_path(
+            car
+        )
+
+        if (
+            len(self.previous_path)
+            < 2
+        ):
+            return path
+
+        accepted = []
+
+        for index, point in enumerate(
+            path
+        ):
+
+            nearest_old = min(
+                self._distance(
+                    point,
+                    old_point,
+                )
+                for old_point
+                in self.previous_path
+            )
+
+            tolerance = (
+                5.0
+                * PIXELS_PER_METER
+                + index
+                * 2.0
+                * PIXELS_PER_METER
+            )
+
+            if (
+                index < 3
+                and
+                nearest_old
+                > tolerance
+            ):
+                continue
+
+            accepted.append(point)
+
+        # New lap / new camera geometry:
+        # do NOT force stale lap-1 path.
+        if len(accepted) < 2:
+
+            self.previous_path = []
+
+            return path
+
+        return accepted
+
+    # ======================================================
+    # HAIRPIN-SAFE SMOOTHING
+    # ======================================================
 
     def _smooth_path(
         self,
@@ -675,63 +1088,108 @@ class LocalPathGenerator:
         if len(path) < 3:
             return path
 
-
-        smoothed = [
-            path[0]
-        ]
-
+        result = [path[0]]
 
         for index in range(
             1,
             len(path) - 1,
         ):
 
-            previous_point = (
-                path[index - 1]
+            p0 = path[index - 1]
+            p1 = path[index]
+            p2 = path[index + 1]
+
+            heading_1 = math.atan2(
+                p0[1] - p1[1],
+                p1[0] - p0[0],
             )
 
-            current_point = (
-                path[index]
+            heading_2 = math.atan2(
+                p1[1] - p2[1],
+                p2[0] - p1[0],
             )
 
-            next_point = (
-                path[index + 1]
-            )
-
-
-            x = (
-                previous_point[0]
-                + current_point[0] * 2.0
-                + next_point[0]
-            ) / 4.0
-
-
-            y = (
-                previous_point[1]
-                + current_point[1] * 2.0
-                + next_point[1]
-            ) / 4.0
-
-
-            smoothed.append(
-                (
-                    x,
-                    y,
+            turn = abs(
+                self._normalize_angle(
+                    heading_2
+                    - heading_1
                 )
             )
 
+            # Preserve hairpin geometry.
+            if (
+                turn
+                > math.radians(22.0)
+            ):
+                result.append(p1)
+                continue
 
-        smoothed.append(
+            # Very mild smoothing elsewhere.
+            result.append(
+                (
+                    0.10 * p0[0]
+                    + 0.80 * p1[0]
+                    + 0.10 * p2[0],
+
+                    0.10 * p0[1]
+                    + 0.80 * p1[1]
+                    + 0.10 * p2[1],
+                )
+            )
+
+        result.append(
             path[-1]
         )
 
+        return result
 
-        return smoothed
+    # ======================================================
+    # VEHICLE ANCHOR
+    # ======================================================
 
+    def _add_vehicle_anchor(
+        self,
+        car,
+        path,
+    ):
+        if not path:
+            return []
 
-    # ==================================================
+        # Short anchor so PP does not artificially
+        # straighten the entrance of the hairpin.
+        distance = (
+            0.50
+            * PIXELS_PER_METER
+        )
+
+        anchor = (
+            car.x
+            + math.cos(car.yaw)
+            * distance,
+
+            car.y
+            - math.sin(car.yaw)
+            * distance,
+        )
+
+        if (
+            self._distance(
+                anchor,
+                path[0],
+            )
+            < 0.25
+            * PIXELS_PER_METER
+        ):
+            return path
+
+        return [
+            anchor,
+            *path,
+        ]
+
+    # ======================================================
     # GENERATE LOCAL PATH
-    # ==================================================
+    # ======================================================
 
     def generate_local_path(
         self,
@@ -739,55 +1197,182 @@ class LocalPathGenerator:
         detected_blue,
         detected_yellow,
     ):
+        # --------------------------------------------------
+        # 1. Camera detections
+        # --------------------------------------------------
 
-        blue = (
-            self._filter_cones(
-                car,
-                detected_blue,
-            )
+        blue = self._filter_cones(
+            car,
+            detected_blue,
         )
 
-
-        yellow = (
-            self._filter_cones(
-                car,
-                detected_yellow,
-            )
+        yellow = self._filter_cones(
+            car,
+            detected_yellow,
         )
 
+        # --------------------------------------------------
+        # 2. Order each colour independently
+        # --------------------------------------------------
 
-        if (
-            len(blue) == 0
-            or len(yellow) == 0
-        ):
-            return []
-
-
-        pairs = (
-            self._create_pairs(
+        blue_boundary = (
+            self._order_boundary(
+                car,
                 blue,
+            )
+            if len(blue) >= 2
+            else []
+        )
+
+        yellow_boundary = (
+            self._order_boundary(
+                car,
                 yellow,
             )
+            if len(yellow) >= 2
+            else []
         )
 
+        # --------------------------------------------------
+        # 3. Try normal two-boundary midpoint path
+        # --------------------------------------------------
 
-        if not pairs:
+        paired_path = []
+        measured_widths = []
+
+        if (
+            len(blue_boundary) >= 2
+            and
+            len(yellow_boundary) >= 2
+        ):
+
+            (
+                paired_path,
+                measured_widths,
+            ) = self._pair_boundaries(
+                blue_boundary,
+                yellow_boundary,
+            )
+
+        self._update_track_width(
+            measured_widths
+        )
+
+        # --------------------------------------------------
+        # 4. Decide whether normal pairing is strong enough
+        # --------------------------------------------------
+
+        if len(paired_path) >= 3:
+
+            path = paired_path
+
+        else:
+
+            # Hairpin / partial visibility fallback.
+            #
+            # Use ONE continuous boundary and estimate
+            # the centre instead of returning [].
+            path = (
+                self._single_boundary_fallback(
+                    car,
+                    blue_boundary,
+                    yellow_boundary,
+                )
+            )
+
+            # If single-boundary reconstruction also
+            # failed but we still have some real pairs,
+            # keep those pairs.
+            if (
+                len(path) < 2
+                and
+                len(paired_path) >= 2
+            ):
+                path = paired_path
+
+        # --------------------------------------------------
+        # 5. Last perception fallback:
+        # keep remaining useful previous path
+        # --------------------------------------------------
+
+        if len(path) < 2:
+
+            self._prune_previous_path(
+                car
+            )
+
+            if (
+                len(self.previous_path)
+                >= 2
+            ):
+                return (
+                    self.previous_path.copy()
+                )
+
             return []
 
+        # --------------------------------------------------
+        # 6. Geometry validation
+        # --------------------------------------------------
 
-        local_path = (
-            self._build_continuous_path(
+        path = self._clean_path(
+            car,
+            path,
+        )
+
+        if len(path) < 2:
+
+            self._prune_previous_path(
+                car
+            )
+
+            if (
+                len(self.previous_path)
+                >= 2
+            ):
+                return (
+                    self.previous_path.copy()
+                )
+
+            return []
+
+        # --------------------------------------------------
+        # 7. Frame-to-frame continuity
+        # --------------------------------------------------
+
+        path = (
+            self._apply_temporal_continuity(
                 car,
-                pairs,
+                path,
             )
         )
 
+        if len(path) < 2:
+            return []
 
-        local_path = (
-            self._smooth_path(
-                local_path
-            )
+        # --------------------------------------------------
+        # 8. Gentle smoothing
+        # --------------------------------------------------
+
+        path = self._smooth_path(
+            path
         )
 
+        # --------------------------------------------------
+        # 9. Short vehicle anchor
+        # --------------------------------------------------
 
-        return local_path
+        path = self._add_vehicle_anchor(
+            car,
+            path,
+        )
+
+        # --------------------------------------------------
+        # 10. Save for next camera frame
+        # --------------------------------------------------
+
+        self.previous_path = (
+            path.copy()
+        )
+
+        return path

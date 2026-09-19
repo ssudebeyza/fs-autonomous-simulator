@@ -1,8 +1,10 @@
 import math
 import sys
+import time
 
 import pygame
 
+from camera import SimulatedCamera
 from controller import (
     PurePursuitController,
     PIDSpeedController,
@@ -10,8 +12,8 @@ from controller import (
 
 from graphics import draw_scene
 from laptimer import LapTimer
+from mpccontroller import MPCController
 from pathgen import LocalPathGenerator
-from perception import ConePerception
 from performance import LapPerformanceTracker
 from speedplanner import CurvatureSpeedPlanner
 from telemetry import TelemetryLogger
@@ -445,12 +447,15 @@ car = FormulaStudentCar(
 
 
 # ============================================================
-# PERCEPTION
+# SIMULATED FRONT CAMERA
 # ============================================================
 
-perception = ConePerception(
-    detection_range=40.0,
-    field_of_view=180.0,
+camera = SimulatedCamera(
+    image_width=640,
+    image_height=360,
+    horizontal_fov_deg=120.0,
+    max_range_m=35.0,
+    camera_height_m=0.75,
 )
 
 
@@ -462,10 +467,10 @@ path_generator = LocalPathGenerator(
     min_track_width_m=3.0,
     max_track_width_m=11.0,
     max_forward_distance_m=35.0,
-    min_forward_distance_m=-5.0,
-    max_lateral_distance_m=18.0,
-    max_forward_pair_difference_m=7.0,
-    max_midpoint_gap_m=14.0,
+    min_forward_distance_m=-4.0,
+    max_lateral_distance_m=20.0,
+    max_forward_pair_difference_m=10.0,
+    max_midpoint_gap_m=14.0
 )
 
 
@@ -473,7 +478,7 @@ path_generator = LocalPathGenerator(
 # STEERING
 # ============================================================
 
-controller = PurePursuitController(
+pure_pursuit_controller = PurePursuitController(
     lookahead_distance=18.0,
     wheelbase=12.8,
     max_steering=0.60,
@@ -484,6 +489,24 @@ controller = PurePursuitController(
     search_backward=4,
     search_forward=18,
 )
+
+mpc_controller = MPCController(
+    wheelbase=12.8,
+    max_steering=0.60,
+    prediction_horizon=18,
+    prediction_dt=0.08,
+    steering_samples=17,
+    pixels_per_meter=PIXELS_PER_METER,
+    path_weight=8.0,
+    heading_weight=5.0,
+    steering_weight=0.05,
+    steering_change_weight=0.25,
+    progress_weight=0.05,
+)
+
+active_controller = pure_pursuit_controller
+controller_name = "PURE PURSUIT"
+controller_compute_ms = 0.0
 
 
 # ============================================================
@@ -569,6 +592,9 @@ local_turn_angle = 0.0
 reference_cte = 0.0
 local_path_error = math.nan
 
+camera_surface = None
+camera_detections = []
+
 
 # ============================================================
 # MAIN LOOP
@@ -602,9 +628,25 @@ while running:
                     not autonomous_mode
                 )
 
-                controller.reset()
+                pure_pursuit_controller.reset()
+                mpc_controller.reset()
                 speed_controller.reset()
                 speed_planner.reset()
+
+            if event.key == pygame.K_c:
+
+                if controller_name == "PURE PURSUIT":
+                    active_controller = mpc_controller
+                    controller_name = "MPC"
+                else:
+                    active_controller = pure_pursuit_controller
+                    controller_name = "PURE PURSUIT"
+
+                pure_pursuit_controller.reset()
+                mpc_controller.reset()
+                car.set_steering_angle(
+                    desired_steering_angle=0.0
+                )
 
             if event.key == pygame.K_r:
 
@@ -614,7 +656,8 @@ while running:
                     yaw=start_yaw,
                 )
 
-                controller.reset()
+                pure_pursuit_controller.reset()
+                mpc_controller.reset()
                 speed_controller.reset()
                 speed_planner.reset()
 
@@ -646,20 +689,27 @@ while running:
 
 
     # ========================================================
-    # PERCEPTION
+    # CAMERA PERCEPTION
+    #
+    # The controller no longer uses ConePerception. The simulated
+    # camera produces forward/lateral detections, which are then
+    # reconstructed into world coordinates for LocalPathGenerator.
     # ========================================================
 
-    detected_blue, detected_yellow = (
-        perception.detect_track_cones(
-            car=car,
-            blue_cones=blue_cones,
-            yellow_cones=yellow_cones,
-        )
+    camera_surface, camera_detections = camera.render(
+        car=car,
+        blue_cones=blue_cones,
+        yellow_cones=yellow_cones,
+    )
+
+    detected_blue, detected_yellow = camera.detections_to_world(
+        car=car,
+        detections=camera_detections,
     )
 
 
     # ========================================================
-    # LOCAL PATH GENERATION
+    # CAMERA-BASED LOCAL PATH GENERATION
     # ========================================================
 
     local_path = (
@@ -688,7 +738,7 @@ while running:
         local_path_timeout = 0.0
 
         path_source = (
-            "CONE PATH"
+            "CAMERA PATH"
         )
 
     else:
@@ -718,7 +768,7 @@ while running:
                 create_recovery_path(
                     car,
                     centerline,
-                    controller,
+                    pure_pursuit_controller,
                     RECOVERY_POINTS,
                 )
             )
@@ -765,12 +815,19 @@ while running:
 
         if len(control_path) >= 2:
 
+            controller_start_time = time.perf_counter()
+
             steering_angle, target_point = (
-                controller.calculate_steering(
+                active_controller.calculate_steering(
                     car,
                     control_path,
                 )
             )
+
+            controller_compute_ms = (
+                time.perf_counter()
+                - controller_start_time
+            ) * 1000.0
 
             car.set_steering_angle(
                 desired_steering_angle=(
@@ -793,6 +850,8 @@ while running:
             control_status = (
                 "NO PATH"
             )
+
+            controller_compute_ms = 0.0
 
 
         # ----------------------------------------------------
@@ -965,6 +1024,8 @@ while running:
             "MANUAL"
         )
 
+        controller_compute_ms = 0.0
+
 
     # ========================================================
     # VEHICLE UPDATE
@@ -983,7 +1044,7 @@ while running:
     # ========================================================
 
     nearest_index = (
-        controller.find_nearest_index(
+        pure_pursuit_controller.find_nearest_index(
             car,
             racing_line,
         )
@@ -1008,7 +1069,7 @@ while running:
     # ========================================================
 
     if (
-        path_source == "CONE PATH"
+        path_source == "CAMERA PATH"
         and
         len(local_path) >= 2
     ):
@@ -1145,6 +1206,39 @@ while running:
 
 
     # ========================================================
+    # SIMULATED FRONT CAMERA PREVIEW
+    #
+    # The same detections shown here are now used to generate
+    # the controller local path.
+    # ========================================================
+
+    camera_preview = pygame.transform.smoothscale(
+        camera_surface,
+        (320, 180),
+    )
+
+    camera_x = SCREEN_WIDTH - camera_preview.get_width() - 15
+    camera_y = 15
+
+    screen.blit(
+        camera_preview,
+        (camera_x, camera_y),
+    )
+
+    pygame.draw.rect(
+        screen,
+        (255, 255, 255),
+        (
+            camera_x - 2,
+            camera_y - 2,
+            camera_preview.get_width() + 4,
+            camera_preview.get_height() + 4,
+        ),
+        2,
+    )
+
+
+    # ========================================================
     # DETECTED BLUE CONES
     # ========================================================
 
@@ -1220,7 +1314,7 @@ while running:
     if (
         len(control_path) >= 2
         and
-        path_source != "CONE PATH"
+        path_source != "CAMERA PATH"
     ):
 
         pygame.draw.lines(
@@ -1246,7 +1340,7 @@ while running:
         15,
         15,
         710,
-        255,
+        310,
     )
 
     pygame.draw.rect(
@@ -1279,8 +1373,17 @@ while running:
         ),
 
         (
-            f"CONTROL: "
-            f"{control_status}"
+            f"CAMERA VISIBLE: {len(camera_detections)}   "
+            f"CONTROL: {control_status}"
+        ),
+
+        (
+            f"CONTROLLER: {controller_name}   "
+            f"COMPUTE {controller_compute_ms:.2f} ms"
+        ),
+
+        (
+            "C = SWITCH CONTROLLER   M = AUTO/MANUAL   R = RESET"
         ),
 
         (
@@ -1316,7 +1419,7 @@ while running:
         ),
 
         (
-            "SPEED SOURCE: LOCAL CONE PATH"
+            "SPEED SOURCE: CAMERA LOCAL PATH"
         ),
     ]
 
